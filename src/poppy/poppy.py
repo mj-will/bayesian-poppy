@@ -2,11 +2,12 @@ import logging
 from typing import Callable
 
 from .flows import get_flow_wrapper
-from .samples.base import BaseSamples
-from .transforms.base import DataTransform
-
+from .samples import Samples
+from .transforms import DataTransform
 
 logger = logging.getLogger(__name__)
+
+
 class Poppy:
     """Posterior post-processing.
 
@@ -36,6 +37,8 @@ class Poppy:
         bounded_to_unbounded: bool = True,
         flow_matching: bool = False,
         device: str | None = None,
+        xp: None = None,
+        flow_backend: str = "zuko",
         **kwargs,
     ) -> None:
         self.log_likelihood = log_likelihood
@@ -43,16 +46,16 @@ class Poppy:
         self.dims = dims
         self.parameters = parameters
         self.device = device
-        data_transform = DataTransform(
-            parameters=parameters,
-            prior_bounds=prior_bounds,
-            periodic_parameters=periodic_parameters,
-            bounded_to_unbounded=bounded_to_unbounded,
-            device=self.device,
-        )
-        self._flow = get_flow_wrapper(flow_matching)(
-            dims=self.dims, data_transform=data_transform, **kwargs
-        )
+
+        self.periodic_parameters = periodic_parameters
+        self.prior_bounds = prior_bounds
+        self.bounded_to_unbounded = bounded_to_unbounded
+        self.flow_matching = flow_matching
+        self.flow_backend = flow_backend
+        self.flow_kwargs = kwargs
+        self.xp = xp
+
+        self._flow = None
 
     @property
     def flow(self):
@@ -66,15 +69,14 @@ class Poppy:
         log_prior=None,
         log_q=None,
         evaluate: bool = True,
-    ) -> BaseSamples:
-        from .samples import Samples
-
+    ) -> Samples:
         samples = Samples(
             x=x,
             parameters=self.parameters,
             log_likelihood=log_likelihood,
             log_prior=log_prior,
             log_q=log_q,
+            xp=self.xp,
         )
 
         if evaluate:
@@ -87,18 +89,37 @@ class Poppy:
             samples.compute_weights()
         return samples
 
-    def fit(self, samples: BaseSamples, **kwargs) -> dict:
-        self.training_samples = samples
-        samples = samples.to_backend()
+    def init_flow(self):
+        if self.flow_backend == "zuko":
+            import array_api_compat.torch as xp
+        elif self.flow_backend == "flowjax":
+            import jax.numpy as xp
+        data_transform = DataTransform(
+            parameters=self.parameters,
+            prior_bounds=self.prior_bounds,
+            periodic_parameters=self.periodic_parameters,
+            bounded_to_unbounded=self.bounded_to_unbounded,
+            device=self.device,
+            xp=xp,
+        )
+        self._flow = get_flow_wrapper(
+            backend=self.flow_backend,
+            flow_matching=self.flow_matching,
+        )(dims=self.dims, data_transform=data_transform, **self.flow_kwargs)
 
+    def fit(self, samples: Samples, **kwargs) -> dict:
+        if self.xp is None:
+            self.xp = samples.xp
+
+        if self.flow is None:
+            self.init_flow()
+
+        self.training_samples = samples
         return self.flow.fit(samples.x, **kwargs)
 
-    def sample_posterior(
-        self, n_samples: int = 1, return_numpy: bool = True
-    ) -> BaseSamples:
-        x, log_q = self.flow.sample(n_samples)
+    def sample_posterior(self, n_samples: int = 1) -> Samples:
+        x, log_q = self.flow.sample_and_log_prob(n_samples)
         samples = self.convert_to_samples(x, log_q=log_q)
-        samples = samples.to_numpy() if return_numpy else samples
         logger.info("Sample summary:")
         logger.info(samples)
         return samples

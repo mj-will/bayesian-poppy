@@ -6,7 +6,7 @@ class Flow:
     def log_prob(self, x):
         raise NotImplementedError
 
-    def sample(self, n_samples):
+    def sample_and_log_prob(self, n_samples):
         raise NotImplementedError
 
     def fit(self, samples, **kwargs):
